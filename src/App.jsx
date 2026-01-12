@@ -1,16 +1,51 @@
-import React, { useState, useEffect } from 'react';
-import { Search, Moon, Sun, ExternalLink, Flame, CalendarClock } from 'lucide-react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { Search, Moon, Sun, Flame, CalendarClock, CheckCircle2, X } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+
+// Ensure you have these assets or replace imports with placeholders if testing locally
+import mtgWhite from './assets/mtg_plains.jpg'
+import mtgBlue from './assets/mtg_island.png';
+import mtgBlack from './assets/mtg_swamp.jpg';
+import mtgRed from './assets/mtg_mountain.png';
+import mtgGreen from './assets/mtg_forest.png';
+import mtgColorless from './assets/mtg_colorless.png';
+import mtgMulti from './assets/mtg_multicolored.webp';
 
 function cn(...inputs) { return twMerge(clsx(inputs)); }
 
 const SCRYFALL_SETS_API = "https://api.scryfall.com/sets";
 const SCRYFALL_SEARCH_API = "https://api.scryfall.com/cards/search";
 
+const MANA_ICONS = {
+  W: mtgWhite,
+  U: mtgBlue,
+  B: mtgBlack,
+  R: mtgRed,
+  G: mtgGreen,
+  C: mtgColorless,
+  M: mtgMulti,
+};
+
+const COLOR_ORDER = {
+  'W': 0, 'U': 1, 'B': 2, 'R': 3, 'G': 4,
+  'M': 5, // Multicolored
+  'C': 6  // Colorless
+};
+
+// Mana Symbol Data for the UI
+const MANA_FILTERS = [
+  { id: 'W', label: 'White', bg: 'bg-[#f8e7b9]', text: 'text-slate-800', border: 'border-[#e6d0a0]' },
+  { id: 'U', label: 'Blue', bg: 'bg-[#b3ceea]', text: 'text-slate-800', border: 'border-[#94b6d9]' },
+  { id: 'B', label: 'Black', bg: 'bg-[#a69f9d]', text: 'text-slate-900', border: 'border-[#8a8482]' },
+  { id: 'R', label: 'Red', bg: 'bg-[#eb9f82]', text: 'text-slate-900', border: 'border-[#d68566]' },
+  { id: 'G', label: 'Green', bg: 'bg-[#c4d3ca]', text: 'text-slate-900', border: 'border-[#a3b8ad]' },
+  { id: 'C', label: 'Colorless', bg: 'bg-slate-300', text: 'text-slate-700', border: 'border-slate-400' },
+  { id: 'M', label: 'Multi', bg: 'bg-gradient-to-br from-[#f8e7b9] via-[#b3ceea] to-[#eb9f82]', text: 'text-slate-900', border: 'border-slate-400' },
+];
+
 export default function App() {
-  // Default to system preference or dark mode
   const [isDark, setIsDark] = useState(() => {
     const saved = localStorage.getItem('theme');
     return saved ? saved === 'dark' : true;
@@ -21,6 +56,12 @@ export default function App() {
   const [cards, setCards] = useState([]);
   const [searchTerm, setSearchTerm] = useState("");
   const [timeLeft, setTimeLeft] = useState({ d: 0, h: 0, m: 0, s: 0 });
+
+  // Selection State
+  const [selectedCards, setSelectedCards] = useState(new Set());
+
+  // Filter State
+  const [activeFilter, setActiveFilter] = useState(null);
 
   // --- Theme Logic ---
   useEffect(() => {
@@ -38,20 +79,69 @@ export default function App() {
   useEffect(() => {
     const fetchData = async () => {
       try {
+        setLoading(true);
         const res = await fetch(SCRYFALL_SETS_API);
         const { data } = await res.json();
-
         const now = new Date();
-        const upcoming = data
-          .filter(s => ['expansion', 'core', 'masters', 'commander'].includes(s.set_type) && new Date(s.released_at) > now)
-          .sort((a, b) => new Date(a.released_at) - new Date(b.released_at))[0];
 
-        if (upcoming) {
-          setCurrentSet(upcoming);
-          // Fetch cards
-          const cardRes = await fetch(`${SCRYFALL_SEARCH_API}?q=set:${upcoming.code}&order=spoiled`);
-          const cardData = await cardRes.json();
-          setCards(cardData.data || []);
+        // Filter for relevant sets
+        let candidates = data
+          .filter(s => ['expansion', 'core', 'masters', 'commander'].includes(s.set_type))
+          .filter(s => new Date(s.released_at) > new Date(now.getTime() - 1000 * 60 * 60 * 24 * 60));
+
+        candidates.sort((a, b) => new Date(a.released_at) - new Date(b.released_at));
+
+        // Logic to prioritize expansion sets if dates match
+        const futureSets = candidates.filter(s => new Date(s.released_at) >= now);
+        let targetSet = futureSets.length > 0 ? futureSets[0] : candidates[candidates.length - 1];
+
+        if (futureSets.length > 0) {
+          const firstDate = futureSets[0].released_at;
+          const sameDaySets = futureSets.filter(s => s.released_at === firstDate);
+          const mainSet = sameDaySets.find(s => s.set_type === 'expansion');
+          if (mainSet) targetSet = mainSet;
+        }
+
+        if (targetSet) {
+          setCurrentSet(targetSet);
+
+          // --- FIXED: Pagination Logic ---
+          let allFetchedCards = [];
+          let nextUri = `${SCRYFALL_SEARCH_API}?q=set:${targetSet.code}&unique=prints`;
+
+          while (nextUri) {
+            const cardRes = await fetch(nextUri);
+            const cardData = await cardRes.json();
+
+            if (cardData.data) {
+              allFetchedCards = [...allFetchedCards, ...cardData.data];
+            }
+
+            // Scryfall provides 'next_page' if there are more results
+            if (cardData.has_more && cardData.next_page) {
+              nextUri = cardData.next_page;
+              // Good practice to wait slightly between requests, though generally fine for 2-3 pages
+              await new Promise(r => setTimeout(r, 50));
+            } else {
+              nextUri = null;
+            }
+          }
+
+          // Sort: Color then CMC
+          const sortedCards = allFetchedCards.sort((a, b) => {
+            const getColorIndex = (c) => {
+              if (!c.colors || c.colors.length === 0) return COLOR_ORDER['C'];
+              if (c.colors.length > 1) return COLOR_ORDER['M'];
+              return COLOR_ORDER[c.colors[0]] ?? 7;
+            };
+
+            const colorA = getColorIndex(a);
+            const colorB = getColorIndex(b);
+            if (colorA !== colorB) return colorA - colorB;
+            return a.cmc - b.cmc;
+          });
+
+          setCards(sortedCards);
         }
       } catch (err) {
         console.error("Fetch error", err);
@@ -66,11 +156,12 @@ export default function App() {
   useEffect(() => {
     if (!currentSet) return;
     const release = new Date(currentSet.released_at);
-    release.setDate(release.getDate() - 7); // Prerelease estimation
+    const prereleaseDate = new Date(release);
+    prereleaseDate.setDate(release.getDate() - 7);
 
     const timer = setInterval(() => {
       const now = new Date();
-      const diff = release - now;
+      const diff = prereleaseDate - now;
 
       if (diff <= 0) {
         setTimeLeft({ d: 0, h: 0, m: 0, s: 0 });
@@ -86,12 +177,48 @@ export default function App() {
     return () => clearInterval(timer);
   }, [currentSet]);
 
-  const filteredCards = cards.filter(c => c.name.toLowerCase().includes(searchTerm.toLowerCase()));
+  const toggleSelection = (id) => {
+    const newSet = new Set(selectedCards);
+    if (newSet.has(id)) newSet.delete(id);
+    else newSet.add(id);
+    setSelectedCards(newSet);
+  };
+
+  const handleFilterClick = (filterId) => {
+    if (activeFilter === filterId) {
+      setActiveFilter(null);
+    } else {
+      setActiveFilter(filterId);
+    }
+  };
+
+  const filteredCards = useMemo(() => {
+    return cards.filter(c => {
+      // 1. Search Term Check
+      if (!c.name.toLowerCase().includes(searchTerm.toLowerCase())) return false;
+
+      // 2. Color Filter Check
+      if (activeFilter) {
+        const cardColors = c.colors || c.card_faces?.[0]?.colors || [];
+
+        if (activeFilter === 'C') {
+          return cardColors.length === 0; // Colorless
+        }
+        if (activeFilter === 'M') {
+          return cardColors.length > 1; // Multicolored
+        }
+        // Mono-colored match
+        return cardColors.length === 1 && cardColors[0] === activeFilter;
+      }
+
+      return true;
+    });
+  }, [cards, searchTerm, activeFilter]);
 
   if (loading) return <LoadingScreen isDark={isDark} />;
 
   return (
-    <div className="min-h-screen w-full transition-colors duration-300 overflow-x-hidden">
+    <div className="min-h-screen w-full transition-colors duration-300 overflow-x-hidden bg-page-bg text-text-main">
 
       {/* Navbar */}
       <nav className="sticky top-0 z-50 w-full border-b border-border-main bg-page-bg/90 backdrop-blur-md">
@@ -111,54 +238,43 @@ export default function App() {
               <input
                 type="text"
                 placeholder="Search cards..."
-                className="bg-slate-100 dark:bg-white/10 border-none rounded-full py-2 pl-10 pr-4 text-sm w-40 sm:w-64 focus:ring-2 focus:ring-indigo-500 focus:bg-white dark:focus:bg-black transition-all outline-none placeholder:text-slate-500"
+                className="bg-slate-100 dark:bg-white/10 border-none rounded-full py-2 pl-10 pr-4 text-sm w-32 sm:w-64 focus:ring-2 focus:ring-indigo-500 focus:bg-white dark:focus:bg-black transition-all outline-none placeholder:text-slate-500"
                 onChange={(e) => setSearchTerm(e.target.value)}
               />
             </div>
             <button
               onClick={() => setIsDark(!isDark)}
               className="p-2.5 rounded-xl bg-slate-100 dark:bg-white/5 hover:bg-slate-200 dark:hover:bg-white/10 transition-all border border-slate-200 dark:border-white/10 text-slate-600 dark:text-slate-400"
-              aria-label="Toggle Theme"
             >
-              {isDark ? (
-                <Sun className="w-5 h-5 text-amber-400" />
-              ) : (
-                <Moon className="w-5 h-5 text-indigo-600" />
-              )}
+              {isDark ? <Sun className="w-5 h-5 text-amber-400" /> : <Moon className="w-5 h-5 text-indigo-600" />}
             </button>
           </div>
         </div>
       </nav>
 
       {/* Hero */}
-      <div className="relative pt-20 pb-16 px-6 overflow-hidden">
-        {/* Modern Glow Effect */}
+      <div className="relative pt-12 pb-12 px-6 overflow-hidden">
         <div className="absolute top-0 left-1/2 -translate-x-1/2 w-full h-full bg-indigo-500/10 dark:bg-indigo-500/20 blur-[120px] -z-10" />
 
         <div className="max-w-7xl mx-auto">
-          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-12">
+          <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-8">
             <div className="max-w-3xl">
-              <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-brand-500/10 text-brand-500 text-xs font-bold uppercase tracking-widest mb-6 border border-brand-500/20">
+              <span className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-brand-500/10 text-brand-500 text-xs font-bold uppercase tracking-widest mb-4 border border-brand-500/20">
                 <span className="w-2 h-2 rounded-full bg-brand-500 animate-pulse" />
-                Live Tracker
+                Next Prerelease
               </span>
-
-              {/* REFINED TITLE: Uses gradient text to stay visible in both modes */}
-              <h1 className="text-5xl md:text-8xl font-black tracking-tighter mb-6 text-hero-text dark:bg-gradient-to-b dark:from-white dark:to-slate-400 dark:bg-clip-text dark:text-transparent leading-tight">
+              <h1 className="text-4xl md:text-7xl font-black tracking-tighter mb-4 text-hero-text dark:bg-gradient-to-b dark:from-white dark:to-slate-400 dark:bg-clip-text dark:text-transparent leading-tight">
                 {currentSet?.name}
               </h1>
-
               <p className="text-lg text-text-muted max-w-xl leading-relaxed">
-                Tracking live spoilers for <span className="text-brand-500 font-bold">{currentSet?.code?.toUpperCase()}</span>. The prerelease event begins in:
+                Tracking live spoilers for <span className="text-brand-500 font-bold">{currentSet?.code?.toUpperCase()}</span>.
               </p>
             </div>
 
-            {/* REFINED COUNTDOWN */}
-            <div className="flex gap-4 p-2 bg-slate-200/50 dark:bg-white/5 backdrop-blur-xl rounded-3xl border border-border-main">
+            <div className="flex gap-4 p-2 bg-slate-200/50 dark:bg-white/5 backdrop-blur-xl rounded-3xl border border-border-main self-start lg:self-center">
               <CountdownUnit val={timeLeft.d} label="Days" />
               <CountdownUnit val={timeLeft.h} label="Hrs" />
               <CountdownUnit val={timeLeft.m} label="Mins" />
-              <CountdownUnit val={timeLeft.s} label="Secs" />
             </div>
           </div>
         </div>
@@ -166,25 +282,90 @@ export default function App() {
 
       {/* Content Grid */}
       <section className="px-4 sm:px-6 pb-24 max-w-7xl mx-auto">
-        <div className="flex items-center justify-between mb-8 border-b border-slate-200 dark:border-white/10 pb-4">
-          <div className="flex items-center gap-3">
-            <CalendarClock className="w-5 h-5 text-indigo-500" />
-            <h2 className="text-xl font-bold">Latest Drops</h2>
+        <div className="flex flex-col md:flex-row md:items-center justify-between mb-8 border-b border-slate-200 dark:border-white/10 pb-4 gap-4">
+
+          <div className="flex flex-col sm:flex-row sm:items-center gap-4 sm:gap-8">
+            <div className="flex items-center gap-3">
+              <CalendarClock className="w-5 h-5 text-indigo-500" />
+              <h2 className="text-xl font-bold">Spoilers</h2>
+            </div>
+
+            {/* Mana Filters */}
+            <div className="flex gap-2">
+              {MANA_FILTERS.map((f) => {
+                const isActive = activeFilter === f.id;
+                return (
+                  <button
+                    key={f.id}
+                    onClick={() => handleFilterClick(f.id)}
+                    className={cn(
+                      "w-8 h-8 rounded-full flex items-center justify-center transition-transform",
+                      isActive
+                        ? "scale-110"
+                        : "opacity-70 hover:opacity-100 hover:scale-105"
+                    )}
+                    title={f.label}
+                  >
+                    <img
+                      src={MANA_ICONS[f.id]}
+                      alt={f.label}
+                      className="w-7 h-7 object-contain rounded-full bg-transparent opacity-300"
+                    />
+                  </button>
+                )
+              })}
+
+              {/* Clear Filter Button */}
+              <AnimatePresence>
+                {activeFilter && (
+                  <motion.button
+                    initial={{ scale: 0, opacity: 0 }}
+                    animate={{ scale: 1, opacity: 1 }}
+                    exit={{ scale: 0, opacity: 0 }}
+                    onClick={() => setActiveFilter(null)}
+                    className="w-8 h-8 flex items-center justify-center rounded-full bg-slate-200 dark:bg-white/10 text-slate-500 hover:bg-red-100 hover:text-red-500 transition-colors ml-1"
+                    title="Clear Filter"
+                  >
+                    <X size={14} />
+                  </motion.button>
+                )}
+              </AnimatePresence>
+            </div>
           </div>
-          <span className="text-sm font-medium px-3 py-1 rounded-md bg-slate-100 dark:bg-white/10 text-slate-600 dark:text-slate-300">
-            {filteredCards.length} Cards
-          </span>
+
+          <div className="flex gap-4 items-center self-end md:self-auto">
+            {selectedCards.size > 0 && (
+              <span className="text-indigo-600 font-bold text-sm bg-indigo-50 dark:bg-indigo-900/20 px-3 py-1 rounded-full">
+                {selectedCards.size} Selected
+              </span>
+            )}
+            <span className="text-sm font-medium px-3 py-1 rounded-md bg-slate-100 dark:bg-white/10 text-slate-600 dark:text-slate-300">
+              {filteredCards.length} Cards
+            </span>
+          </div>
         </div>
 
         <motion.div
           layout
           className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 gap-4 sm:gap-6"
         >
-          <AnimatePresence>
+          <AnimatePresence mode="popLayout">
             {filteredCards.map((card, idx) => (
-              <CardItem key={card.id} card={card} index={idx} />
+              <CardItem
+                key={card.id}
+                card={card}
+                index={idx}
+                isSelected={selectedCards.has(card.id)}
+                onToggle={() => toggleSelection(card.id)}
+              />
             ))}
           </AnimatePresence>
+          {filteredCards.length === 0 && (
+            <div className="col-span-full py-20 text-center opacity-50">
+              <p className="text-xl font-medium">No cards match your filter.</p>
+              <button onClick={() => setActiveFilter(null)} className="text-indigo-500 text-sm mt-2 hover:underline">Clear Filters</button>
+            </div>
+          )}
         </motion.div>
       </section>
     </div>
@@ -195,39 +376,85 @@ export default function App() {
 
 function CountdownUnit({ val, label }) {
   return (
-    <div className="flex flex-col items-center bg-white dark:bg-[#111] border border-slate-200 dark:border-white/10 p-3 sm:p-4 rounded-xl shadow-sm min-w-[70px] sm:min-w-[85px]">
-      <span className="text-2xl sm:text-3xl font-bold tabular-nums text-indigo-600 dark:text-indigo-400">
+    <div className="flex flex-col items-center bg-white dark:bg-[#111] border border-slate-200 dark:border-white/10 p-3 rounded-xl shadow-sm min-w-[70px]">
+      <span className="text-2xl font-bold tabular-nums text-indigo-600 dark:text-indigo-400">
         {String(val).padStart(2, '0')}
       </span>
-      <span className="text-[10px] sm:text-xs font-bold uppercase tracking-wider text-slate-400 mt-1">
+      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mt-1">
         {label}
       </span>
     </div>
   );
 }
 
-function CardItem({ card, index }) {
+function CardItem({ card, index, isSelected, onToggle }) {
   const img = card.image_uris?.normal || card.card_faces?.[0]?.image_uris?.normal;
+  const colors = card.colors || card.card_faces?.[0]?.colors || [];
 
   return (
     <motion.div
-      layout
-      className="group bg-card-bg border border-border-main rounded-2xl p-2 transition-all hover:shadow-2xl hover:shadow-brand-500/10 hover:-translate-y-1"
+      // REMOVED 'layout' prop here to fix the janky stretching animation
+      initial={{ opacity: 0, scale: 0.9 }}
+      animate={{ opacity: 1, scale: 1 }}
+      exit={{ opacity: 0, scale: 0.9 }}
+      transition={{ duration: 0.2 }}
+      onClick={onToggle}
+      className={cn(
+        "group relative bg-card-bg border rounded-2xl p-2 transition-all hover:shadow-xl cursor-pointer select-none",
+        isSelected
+          ? "border-indigo-500 ring-2 ring-indigo-500/50 shadow-indigo-500/20 scale-[1.02] z-10"
+          : "border-border-main hover:-translate-y-1 hover:shadow-brand-500/10"
+      )}
     >
       <div className="relative aspect-[2.5/3.5] rounded-xl overflow-hidden shadow-inner bg-slate-200 dark:bg-slate-800">
-        <img src={img} alt={card.name} className="w-full h-full object-cover" />
+        {img ? (
+          <img src={img} alt={card.name} className="w-full h-full object-cover" loading="lazy" />
+        ) : (
+          <div className="flex items-center justify-center h-full text-xs text-center p-2">No Image</div>
+        )}
 
-        {/* Scryfall Button Hover */}
+        {/* Selected Overlay */}
+        {isSelected && (
+          <div className="absolute inset-0 bg-indigo-500/20 flex items-center justify-center backdrop-blur-[1px]">
+            <CheckCircle2 className="w-12 h-12 text-white drop-shadow-md" />
+          </div>
+        )}
+
         <div className="absolute inset-0 bg-slate-900/60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center backdrop-blur-[2px]">
-          <a href={card.scryfall_uri} target="_blank" className="bg-white text-black px-4 py-2 rounded-full font-bold text-xs scale-90 group-hover:scale-100 transition-transform">
+          <a
+            href={card.scryfall_uri}
+            target="_blank"
+            rel="noreferrer"
+            onClick={(e) => e.stopPropagation()}
+            className="bg-white text-black px-4 py-2 rounded-full font-bold text-xs scale-90 group-hover:scale-100 transition-transform hover:bg-indigo-50"
+          >
             Details
           </a>
         </div>
       </div>
 
-      <div className="mt-4 px-1 pb-2">
-        <h3 className="font-bold text-text-main truncate">{card.name}</h3>
-        <p className="text-[10px] text-text-muted uppercase font-bold tracking-widest mt-1">{card.rarity}</p>
+      <div className="mt-3 px-1 pb-1">
+        <div className="flex justify-between items-start gap-2">
+          <h3 className="font-bold text-text-main truncate text-sm leading-snug">{card.name}</h3>
+          {card.mana_cost && <span className="text-[10px] font-mono text-text-muted whitespace-nowrap">{card.mana_cost}</span>}
+        </div>
+        <div className="flex justify-between items-center mt-2">
+          <p className="text-[10px] text-text-muted uppercase font-bold tracking-widest">{card.rarity}</p>
+          {colors.length > 0 && (
+            <div className="flex -space-x-1">
+              {colors.map(c => (
+                <span key={c} className={cn(
+                  "w-2.5 h-2.5 rounded-full border border-card-bg shadow-sm",
+                  c === 'W' && "bg-[#f8e7b9]",
+                  c === 'U' && "bg-[#b3ceea]",
+                  c === 'B' && "bg-[#a69f9d]",
+                  c === 'R' && "bg-[#eb9f82]",
+                  c === 'G' && "bg-[#c4d3ca]"
+                )} />
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </motion.div>
   );
